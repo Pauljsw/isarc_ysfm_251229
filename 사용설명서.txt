@@ -1,0 +1,22 @@
+본 파일은 'run.sh' 파일 내에 Phase 별 실행되는 실제 명령어로서, 해당 부분의 파라미터(숫자)를 변경함에 따라 성능과 결과가 달라질 수 있다.
+
+1. python -m src.pipeline sfm --config configs/simple.yaml
+
+2. python -m src.pipeline infer --config configs/simple.yaml
+
+3. python -m src.d2c_and_pixel_scale     --depth-dir data/depth     --rgb-calib calib/rgb_camera_info.json     --depth-calib calib/depth_camera_info.json     --extrinsic calib/extrinsic_depth_to_color.json     --output-dir outputs/d2c_pixel_scale
+
+
+4.python -m src.point_cloud_overlay --sparse-dir data/sfm/sparse/0 --masks-dir data/yolo_masks --output outputs/sfm_masked_cloud.ply --output-json outputs/crack_points.json --crack-color 255 0 0 --min-track-length 2 --vote-threshold 0.5 --min-confidence 0.25 --log-level INFO
+
+5.python -m src.upsample_crack_points     --input outputs/crack_points.json     --output outputs/crack_points_upsampled.json     --method density --k-neighbors 5     --max-distance 0.1 --min-spacing 0.005
+
+
+6. python -m src.cluster_crack_points_dbscan     --input outputs/crack_points_upsampled.json     --output outputs/crack_clusters.json     --output-ply outputs/clustered_cracks.ply     --eps 0.1 --min-samples 40     --split-angle 90     --merge-distance 0.2 --merge-angle 30     --log-level DEBUG
+
+
+7. python -m src.measure_clusters --clusters outputs/crack_clusters.json --crack-points outputs/crack_points.json --masks-dir data/yolo_masks --scale-maps-dir outputs/d2c_pixel_scale --rgb-dir data/rgb --output outputs/cluster_measurements.json --image-width 3840 --image-height 2160 --n-segments 100 --detection-method gradient --gradient-percentile 80 --min-component-ratio 0.3 --max-width-filter 1.0 --sample-interval 5 --log-level INFO --viz-dir outputs/visualizations_measurements
+
+
+8. python src/generate_inspection_report.py   --ply outputs/clustered_cracks.ply   --crack-points outputs/crack_points.json   --measurements outputs/cluster_measurements.json   --flip-y
+

@@ -1,0 +1,81 @@
+# Simple Pipeline Configuration
+# For SFM-based crack measurement with pixel-to-mm calibration
+
+paths:
+  rgb_dir: data/rgb
+  depth_dir: data/depth
+  masks_dir: data/yolo_masks
+  sfm_dir: data/sfm
+  calib_rgb: calib/rgb_camera_info.json
+  calib_depth: calib/depth_camera_info.json
+  out_dir: outputs
+
+# YOLO Segmentation
+yolo:
+  weights: models/best.pt
+  data_config: yolo_data.yaml
+  conf: 0.20                # Low threshold to catch all cracks
+  iou: 0.45
+  img_size: 1280
+  device: null              # Auto-detect (use GPU if available)
+  max_det: 300
+
+# SFM (Structure from Motion)
+# SFM (Structure from Motion)
+# SFM (Structure from Motion)
+sfm:
+  colmap_exe: /usr/local/bin/colmap   # ← 새로 추가 (절대경로 권장)
+  camera_model: OPENCV
+  quality: high                       # low | medium | high | extreme
+  use_gpu: true                       # ← 새로 추가 (SIFT/Matching에서 GPU 사용)
+  matcher: exhaustive                 # exhaustive | sequential | spatial
+  dense: false             # Set to true if you have CUDA (see DENSE_SFM_SETUP.md)
+  dense_params:
+    geom_consistency: false           # 첫 시도는 false로 (성공률↑)
+    max_image_size: 2160
+
+# Pixel-to-MM Calibration
+pixel_calibration:
+  save_maps: false          # Save individual scale maps (.npy)
+  num_samples: 25            # 3x3 grid sampling
+
+# Point Cloud Overlay
+point_cloud_overlay:
+  crack_color: [255, 0, 0]  # Red for cracks
+  min_track_length: 2       # Minimum observations per 3D point
+  vote_threshold: 0.5       # Minimum vote ratio (0.5 = majority voting)
+                             # 0.3 = lenient (more cracks, more false positives)
+                             # 0.5 = balanced (recommended)
+                             # 0.7 = strict (fewer cracks, high confidence)
+  min_confidence: 0.25       # Minimum YOLO confidence to consider
+                             # Should be slightly higher than YOLO inference threshold
+                             # Typical range: 0.2-0.4
+
+# Measurement
+measurement:
+  min_length_mm: 10.0       # Minimum crack length (1cm)
+  img_shape: [2160, 3840]   # (H, W) for rasterization
+
+# Class Definitions (9 defect types)
+classes:
+  crack: 0
+  spalling: 1
+  efflorescence: 2
+  exposed_rebar: 3
+  corrosion: 4
+  water_leakage: 5
+  honeycomb: 6
+  segregation: 7
+  pop_out: 8
+
+# Visualization Colors (RGB format)
+colors:
+  crack: [255, 0, 0]           # Red
+  spalling: [0, 255, 0]        # Green
+  efflorescence: [0, 0, 255]   # Blue
+  exposed_rebar: [255, 255, 0] # Yellow
+  corrosion: [255, 0, 255]     # Magenta
+  water_leakage: [0, 255, 255] # Cyan
+  honeycomb: [128, 0, 255]     # Purple
+  segregation: [255, 128, 0]   # Orange
+  pop_out: [0, 128, 255]       # Sky Blue

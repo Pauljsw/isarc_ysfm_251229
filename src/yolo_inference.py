@@ -287,7 +287,9 @@ class YOLOSegmenterWithCrop(YOLOSegmenter):
         # New parameters for crop mode
         use_crop: bool = False,
         crop_grid: Tuple[int, int] = (2, 2),
+        crop_overlap: int = 0,
         merge_iou: float = 0.5,
+        enable_union: bool = True,
         save_crop_viz: bool = False
     ) -> None:
         """
@@ -305,7 +307,9 @@ class YOLOSegmenterWithCrop(YOLOSegmenter):
             colors: Optional class colors
             use_crop: Enable crop-based inference
             crop_grid: (rows, cols) grid for cropping
+            crop_overlap: Overlap pixels between adjacent crops
             merge_iou: IoU threshold for merging crop detections
+            enable_union: Enable polygon union for merging (vs suppression)
             save_crop_viz: Save crop boundary visualizations
         """
         # Initialize parent class
@@ -324,7 +328,9 @@ class YOLOSegmenterWithCrop(YOLOSegmenter):
         # Crop-specific settings
         self.use_crop = use_crop
         self.crop_grid = crop_grid
+        self.crop_overlap = crop_overlap
         self.merge_iou = merge_iou
+        self.enable_union = enable_union
         self.save_crop_viz = save_crop_viz
 
         if self.use_crop:
@@ -332,7 +338,10 @@ class YOLOSegmenterWithCrop(YOLOSegmenter):
             from .crop_inference import ImageCropper, CropInferenceEngine
             from .mask_merge import merge_class_aware
 
-            self.cropper = ImageCropper(grid_size=crop_grid)
+            self.cropper = ImageCropper(
+                grid_size=crop_grid,
+                overlap=crop_overlap
+            )
             self.crop_engine = CropInferenceEngine(
                 yolo_model=self.model,
                 cropper=self.cropper,
@@ -344,7 +353,8 @@ class YOLOSegmenterWithCrop(YOLOSegmenter):
             self.merge_func = merge_class_aware
 
             logger.info(
-                f"Crop mode enabled: grid={crop_grid}, merge_iou={merge_iou}"
+                f"Crop mode enabled: grid={crop_grid}, overlap={crop_overlap}, "
+                f"merge_iou={merge_iou}, union={'enabled' if enable_union else 'disabled'}"
             )
         else:
             logger.debug("Crop mode disabled (standard inference)")
@@ -405,7 +415,8 @@ class YOLOSegmenterWithCrop(YOLOSegmenter):
             detections,
             class_names=self.class_names,
             iou_threshold=self.merge_iou,
-            image_shape=(height, width)
+            image_shape=(height, width),
+            enable_union=self.enable_union
         )
 
         logger.info(

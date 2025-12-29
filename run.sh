@@ -126,8 +126,8 @@ phase6() {
             --input outputs/crack_points_upsampled.json \
             --output outputs/crack_clusters.json \
             --output-ply outputs/clustered_cracks.ply \
-            --eps 0.1 \
-            --min-samples 10 \
+            --eps 0.15 \
+            --min-samples 5 \
             --split-angle 90 \
             --merge-distance 0.2 \
             --merge-angle 30 \

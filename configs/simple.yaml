@@ -20,6 +20,14 @@ yolo:
   device: null              # Auto-detect (use GPU if available)
   max_det: 300
 
+  # Crop-based Multi-scale Inference (optional)
+  crop:
+    grid: [2, 2]            # Grid size (rows, cols)
+    overlap: 150            # Overlap pixels between adjacent crops (15% of typical crop)
+    merge_iou: 0.3          # IoU threshold for merging detections
+    enable_union: true      # Enable polygon union (vs simple suppression)
+    save_viz: false         # Save crop boundary visualizations
+
 # SFM (Structure from Motion)
 # SFM (Structure from Motion)
 # SFM (Structure from Motion)

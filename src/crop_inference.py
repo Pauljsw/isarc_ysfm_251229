@@ -36,7 +36,7 @@ class ImageCropper:
 
         Args:
             grid_size: (rows, cols) grid subdivision
-            overlap: Overlap pixels between adjacent crops (future use)
+            overlap: Overlap pixels between adjacent crops
             min_crop_size: Minimum crop dimension (safety check)
         """
         self.grid_size = grid_size
@@ -89,11 +89,26 @@ class ImageCropper:
         crops = []
         for r in range(rows):
             for c in range(cols):
-                # Calculate boundaries
+                # Calculate base boundaries
                 y_start = r * crop_h
                 y_end = (r + 1) * crop_h if r < rows - 1 else H
                 x_start = c * crop_w
                 x_end = (c + 1) * crop_w if c < cols - 1 else W
+
+                # Apply overlap (expand boundaries where possible)
+                if self.overlap > 0:
+                    # Expand upward (except first row)
+                    if r > 0:
+                        y_start = max(0, y_start - self.overlap)
+                    # Expand downward (except last row)
+                    if r < rows - 1:
+                        y_end = min(H, y_end + self.overlap)
+                    # Expand leftward (except first column)
+                    if c > 0:
+                        x_start = max(0, x_start - self.overlap)
+                    # Expand rightward (except last column)
+                    if c < cols - 1:
+                        x_end = min(W, x_end + self.overlap)
 
                 # Extract crop
                 crop_img = image[y_start:y_end, x_start:x_end].copy()

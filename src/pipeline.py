@@ -391,7 +391,9 @@ class Pipeline:
                 common_params.update({
                     'use_crop': True,
                     'crop_grid': tuple(crop_config.get('grid', [2, 2])),
+                    'crop_overlap': crop_config.get('overlap', 0),
                     'merge_iou': crop_config.get('merge_iou', 0.5),
+                    'enable_union': crop_config.get('enable_union', True),
                     'save_crop_viz': crop_config.get('save_viz', False)
                 })
 

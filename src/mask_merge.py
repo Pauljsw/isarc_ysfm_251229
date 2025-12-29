@@ -102,14 +102,64 @@ def compute_polygon_iou(
     return float(intersection / union) if union > 0 else 0.0
 
 
+def merge_polygons_union(
+    poly1: List[List[float]],
+    poly2: List[List[float]]
+) -> Optional[List[List[float]]]:
+    """
+    Merge two overlapping polygons using geometric union.
+
+    Args:
+        poly1, poly2: Polygons as list of [x, y] points
+
+    Returns:
+        Merged polygon, or None if merge fails
+    """
+    try:
+        from shapely.geometry import Polygon
+        from shapely.validation import make_valid
+        from shapely.ops import unary_union
+
+        p1 = Polygon(poly1)
+        p2 = Polygon(poly2)
+
+        # Handle invalid geometries
+        if not p1.is_valid:
+            p1 = make_valid(p1)
+        if not p2.is_valid:
+            p2 = make_valid(p2)
+
+        # Union the polygons
+        merged = unary_union([p1, p2])
+
+        # Extract exterior coordinates
+        if hasattr(merged, 'exterior'):
+            coords = list(merged.exterior.coords[:-1])  # Remove duplicate last point
+            return [[float(x), float(y)] for x, y in coords]
+        elif hasattr(merged, 'geoms'):
+            # MultiPolygon case - take largest polygon
+            largest = max(merged.geoms, key=lambda p: p.area)
+            coords = list(largest.exterior.coords[:-1])
+            return [[float(x), float(y)] for x, y in coords]
+        else:
+            logger.warning("Union resulted in unexpected geometry type")
+            return None
+
+    except Exception as e:
+        logger.warning(f"Polygon union failed: {e}")
+        return None
+
+
 def merge_detections_nms(
     detections: List[Dict],
     iou_threshold: float = 0.5,
     use_shapely: bool = True,
-    image_shape: Optional[Tuple[int, int]] = None
+    image_shape: Optional[Tuple[int, int]] = None,
+    merge_threshold: float = 0.5,
+    enable_union: bool = True
 ) -> List[Dict]:
     """
-    Merge overlapping detections using Non-Maximum Suppression.
+    Merge overlapping detections using NMS with optional polygon union.
 
     Critical for crop-based inference where the same defect may be
     detected in multiple adjacent crops.
@@ -117,8 +167,10 @@ def merge_detections_nms(
     Algorithm:
     1. Sort detections by confidence score (descending)
     2. For each detection (highest confidence first):
-       - Keep if no overlap with higher-confidence detection
-       - Suppress if IoU > threshold with same-class higher-confidence detection
+       - If IoU > merge_threshold with same-class detection:
+         * If enable_union: Merge polygons via geometric union
+         * Else: Suppress lower-confidence detection (standard NMS)
+       - Keep if no significant overlap
 
     Args:
         detections: List of detection dicts with:
@@ -126,12 +178,14 @@ def merge_detections_nms(
             - 'class_id': Integer class ID
             - 'score': Confidence score
             - (optional) 'crop_id': Source crop identifier
-        iou_threshold: IoU threshold for suppression
+        iou_threshold: IoU threshold for suppression (legacy parameter)
         use_shapely: Use Shapely for geometry (recommended)
         image_shape: (height, width) for fallback rasterization
+        merge_threshold: IoU threshold for merging polygons
+        enable_union: If True, merge polygons; if False, use standard NMS
 
     Returns:
-        Deduplicated list of detections
+        Deduplicated/merged list of detections
     """
     if len(detections) == 0:
         return []
@@ -155,30 +209,29 @@ def merge_detections_nms(
         reverse=True
     )
 
-    keep_indices = []
+    # Create mutable list of detections
+    working_detections = [det.copy() for det in detections]
     suppressed = set()
+    merged_count = 0
 
     for i in sorted_indices:
         if i in suppressed:
             continue
 
-        det_i = detections[i]
+        det_i = working_detections[i]
         poly_i = det_i['polygon']
         class_i = det_i['class_id']
 
-        # Keep this detection
-        keep_indices.append(i)
-
-        # Check for suppressions
+        # Check for merges/suppressions
         for j in sorted_indices:
             if j <= i or j in suppressed:
                 continue
 
-            det_j = detections[j]
+            det_j = working_detections[j]
             poly_j = det_j['polygon']
             class_j = det_j['class_id']
 
-            # Only suppress same-class detections
+            # Only merge/suppress same-class detections
             if class_i != class_j:
                 continue
 
@@ -190,23 +243,54 @@ def merge_detections_nms(
                     use_shapely=use_shapely
                 )
 
-                if iou > iou_threshold:
-                    suppressed.add(j)
-                    logger.debug(
-                        f"Suppressed detection {j} (IoU={iou:.3f} with {i})"
-                    )
+                if iou > merge_threshold:
+                    if enable_union:
+                        # Merge polygons via union
+                        merged_poly = merge_polygons_union(poly_i, poly_j)
+                        if merged_poly is not None:
+                            # Update detection i with merged polygon
+                            working_detections[i]['polygon'] = merged_poly
+                            poly_i = merged_poly  # Update for subsequent merges
+                            # Take max confidence
+                            working_detections[i]['score'] = max(
+                                det_i['score'], det_j['score']
+                            )
+                            suppressed.add(j)
+                            merged_count += 1
+                            logger.debug(
+                                f"Merged detection {j} into {i} (IoU={iou:.3f})"
+                            )
+                        else:
+                            # Merge failed, fall back to suppression
+                            suppressed.add(j)
+                            logger.debug(
+                                f"Suppressed detection {j} (merge failed, IoU={iou:.3f})"
+                            )
+                    else:
+                        # Standard NMS suppression
+                        suppressed.add(j)
+                        logger.debug(
+                            f"Suppressed detection {j} (IoU={iou:.3f} with {i})"
+                        )
 
             except Exception as e:
                 logger.warning(f"IoU computation failed for {i},{j}: {e}")
                 continue
 
     # Return kept detections
-    merged = [detections[i] for i in keep_indices]
+    keep_indices = [i for i in sorted_indices if i not in suppressed]
+    merged = [working_detections[i] for i in keep_indices]
 
-    logger.info(
-        f"NMS: {len(detections)} detections → {len(merged)} "
-        f"({len(detections) - len(merged)} suppressed)"
-    )
+    if enable_union:
+        logger.info(
+            f"NMS+Union: {len(detections)} detections → {len(merged)} "
+            f"({merged_count} merged, {len(suppressed) - merged_count} suppressed)"
+        )
+    else:
+        logger.info(
+            f"NMS: {len(detections)} detections → {len(merged)} "
+            f"({len(detections) - len(merged)} suppressed)"
+        )
 
     return merged
 
@@ -250,10 +334,11 @@ def merge_class_aware(
     class_names: List[str],
     iou_threshold: float = 0.5,
     per_class_threshold: Optional[Dict[str, float]] = None,
-    image_shape: Optional[Tuple[int, int]] = None
+    image_shape: Optional[Tuple[int, int]] = None,
+    enable_union: bool = True
 ) -> Tuple[List[Dict], Dict]:
     """
-    Class-aware NMS with optional per-class IoU thresholds.
+    Class-aware NMS with optional per-class IoU thresholds and polygon union.
 
     Args:
         detections: List of detections
@@ -261,6 +346,7 @@ def merge_class_aware(
         iou_threshold: Default IoU threshold
         per_class_threshold: Optional dict of class_name -> threshold
         image_shape: Image dimensions
+        enable_union: Enable polygon union for merging (vs suppression)
 
     Returns:
         (merged_detections, statistics)
@@ -293,6 +379,8 @@ def merge_class_aware(
         merged_class = merge_detections_nms(
             class_dets,
             iou_threshold=threshold,
+            merge_threshold=threshold,
+            enable_union=enable_union,
             image_shape=image_shape
         )
 

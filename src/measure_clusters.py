@@ -1440,6 +1440,97 @@ def compute_polygon_area_2d(points_2d: np.ndarray, scale_map: np.ndarray) -> flo
     return area_mm2
 
 
+def calculate_mask_area_with_scale(
+    binary_mask: np.ndarray,
+    scale_map: np.ndarray
+) -> float:
+    """
+    Calculate actual area by summing D×D for each mask pixel.
+
+    This is more accurate than 3D OBB because:
+    - Uses dense 2D mask (not sparse 3D points)
+    - Accounts for perspective distortion via per-pixel scale
+    - Directly uses YOLO detection boundary
+
+    Args:
+        binary_mask: Binary mask (HxW)
+        scale_map: Per-pixel mm/px scale map (HxW)
+
+    Returns:
+        Area in mm²
+    """
+    rows, cols = np.where(binary_mask > 0)
+
+    if len(rows) == 0:
+        return 0.0
+
+    total_area = 0.0
+    for r, c in zip(rows, cols):
+        D = get_scale_with_fallback(scale_map, r, c)
+        if D > 0:
+            total_area += D * D  # Each pixel contributes D×D mm²
+
+    return total_area
+
+
+def calculate_2d_obb_with_scale(
+    binary_mask: np.ndarray,
+    scale_map: np.ndarray
+) -> Tuple[float, float]:
+    """
+    Calculate OBB length/width using PCA on 2D pixel coordinates.
+    Convert to mm using median scale of the mask region.
+
+    Args:
+        binary_mask: Binary mask (HxW)
+        scale_map: Per-pixel mm/px scale map (HxW)
+
+    Returns:
+        (length_mm, width_mm) - OBB dimensions
+    """
+    rows, cols = np.where(binary_mask > 0)
+
+    if len(rows) < 3:
+        return 0.0, 0.0
+
+    # Get representative scale (median of all mask pixels)
+    scales = []
+    for r, c in zip(rows, cols):
+        D = get_scale_with_fallback(scale_map, r, c)
+        if D > 0:
+            scales.append(D)
+
+    if not scales:
+        return 0.0, 0.0
+
+    D_median = np.median(scales)
+
+    # PCA to find principal axes
+    coords = np.column_stack([rows, cols])
+    coords_centered = coords - coords.mean(axis=0)
+
+    # Covariance matrix
+    cov = np.cov(coords_centered.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+
+    # Sort by eigenvalue (largest = major axis)
+    idx = eigenvalues.argsort()[::-1]
+    eigenvectors = eigenvectors[:, idx]
+
+    # Project onto principal axes
+    projected = coords_centered @ eigenvectors
+
+    # Extent along each axis (in pixels)
+    length_px = np.ptp(projected[:, 0])  # major axis range
+    width_px = np.ptp(projected[:, 1])   # minor axis range
+
+    # Convert to mm
+    length_mm = length_px * D_median
+    width_mm = width_px * D_median
+
+    return length_mm, width_mm
+
+
 def measure_obb_defect(
     cluster: Dict,
     crack_points_lookup: Dict[int, Dict],
@@ -1448,7 +1539,15 @@ def measure_obb_defect(
     image_shape: Tuple[int, int]
 ) -> Dict:
     """
-    Measure non-crack defect using OBB (Oriented Bounding Box) + Area.
+    Measure non-crack defect using 2D mask + scale map.
+
+    Strategy:
+    - Primary: Area calculated from 2D mask with per-pixel scale (D×D summation)
+    - Secondary: Length/Width from 2D OBB with median scale
+    - Reference: 3D OBB for comparison (optional)
+
+    This approach ensures consistency with crack measurement methodology,
+    where all defects use 2D image + depth-calibrated scale maps.
 
     Args:
         cluster: Cluster dict from crack_clusters.json
@@ -1458,7 +1557,7 @@ def measure_obb_defect(
         image_shape: (height, width)
 
     Returns:
-        Measurement dict with width, length, area
+        Measurement dict with width, length, area (all scale-corrected)
     """
     cluster_id = cluster['cluster_id']
     defect_class = cluster.get('class', 'unknown')
@@ -1480,34 +1579,31 @@ def measure_obb_defect(
             'width_mm': 0,
             'length_mm': 0,
             'area_mm2': 0,
-            'method': 'obb',
+            'method': 'area_2d_scaled',
             'n_points': 0
         }
 
-    # Extract 3D coordinates
-    points_3d = np.array([p['xyz'] for p in cluster_points])
-
-    # Compute OBB in 3D
-    length_3d, width_3d, _, _ = compute_obb_3d(points_3d)
-
-    # Also measure in 2D for area calculation
-    # Find best covering mask
+    # Find best source mask (mask with most points)
     source_masks = cluster.get('source_masks', [])
     if not source_masks:
         logger.warning(f"Cluster {cluster_id} ({defect_class}): No source masks")
+        # Fallback to 3D OBB if no masks
+        points_3d = np.array([p['xyz'] for p in cluster_points])
+        length_3d, width_3d, _, _ = compute_obb_3d(points_3d)
         return {
             'cluster_id': cluster_id,
             'class': defect_class,
             'width_mm': width_3d,
             'length_mm': length_3d,
-            'area_mm2': 0,
-            'method': 'obb_3d_only',
+            'area_mm2': length_3d * width_3d,
+            'method': 'obb_3d_fallback',
             'n_points': len(cluster_points)
         }
 
-    # Use the mask with most points
+    # Select best source (first one, or could select by max point count)
     best_source = source_masks[0]
     image_id = best_source['image_id']
+    mask_id = best_source['mask_id']
 
     # Load scale map
     timestamp_key = image_id
@@ -1531,41 +1627,81 @@ def measure_obb_defect(
 
     if scale_map is None:
         logger.warning(f"Cluster {cluster_id} ({defect_class}): Scale map not found for {image_id}")
+        # Fallback to 3D OBB
+        points_3d = np.array([p['xyz'] for p in cluster_points])
+        length_3d, width_3d, _, _ = compute_obb_3d(points_3d)
         return {
             'cluster_id': cluster_id,
             'class': defect_class,
             'width_mm': width_3d,
             'length_mm': length_3d,
-            'area_mm2': 0,
-            'method': 'obb_3d_only',
+            'area_mm2': length_3d * width_3d,
+            'method': 'obb_3d_fallback',
             'n_points': len(cluster_points)
         }
 
-    # Collect 2D pixel coordinates from cluster points
-    points_2d = []
-    for point in cluster_points:
-        sources = point.get('source_masks', point.get('sources', []))
-        for source in sources:
-            if source['image_id'] == image_id:
-                # Get pixel coordinates from source info
-                # Note: This assumes source has 'pixel_xy' or we need to project 3D to 2D
-                # For now, we'll use a simplified approach
-                pass
+    # Load mask polygon from YOLO detection
+    polygon = load_mask_polygon(masks_dir, image_id, mask_id)
 
-    # If we can't get 2D points, estimate area from 3D
-    area_mm2 = length_3d * width_3d  # Rough estimate
+    if not polygon:
+        logger.warning(f"Cluster {cluster_id} ({defect_class}): Could not load mask polygon for {image_id}, mask {mask_id}")
+        # Fallback to 3D OBB
+        points_3d = np.array([p['xyz'] for p in cluster_points])
+        length_3d, width_3d, _, _ = compute_obb_3d(points_3d)
+        return {
+            'cluster_id': cluster_id,
+            'class': defect_class,
+            'width_mm': width_3d,
+            'length_mm': length_3d,
+            'area_mm2': length_3d * width_3d,
+            'method': 'obb_3d_fallback',
+            'n_points': len(cluster_points)
+        }
+
+    # Convert polygon to binary mask
+    binary_mask = polygon_to_binary_mask(polygon, image_shape)
+
+    if binary_mask.sum() == 0:
+        logger.warning(f"Cluster {cluster_id} ({defect_class}): Empty mask")
+        return {
+            'cluster_id': cluster_id,
+            'class': defect_class,
+            'width_mm': 0,
+            'length_mm': 0,
+            'area_mm2': 0,
+            'method': 'area_2d_scaled',
+            'n_points': len(cluster_points)
+        }
+
+    # === NEW: 2D Scale-based Measurement ===
+
+    # 1. Calculate precise area using per-pixel scale (D×D summation)
+    area_mm2 = calculate_mask_area_with_scale(binary_mask, scale_map)
+
+    # 2. Calculate OBB length/width using 2D PCA with median scale
+    length_mm, width_mm = calculate_2d_obb_with_scale(binary_mask, scale_map)
+
+    # 3. Optional: Compute 3D OBB for comparison/validation
+    points_3d = np.array([p['xyz'] for p in cluster_points])
+    length_3d, width_3d, _, _ = compute_obb_3d(points_3d)
 
     logger.info(f"Cluster {cluster_id} ({defect_class}): "
-                f"L={length_3d:.1f}mm, W={width_3d:.1f}mm, A={area_mm2:.1f}mm²")
+                f"Area={area_mm2:.1f}mm² (2D scaled), "
+                f"L={length_mm:.1f}mm, W={width_mm:.1f}mm (2D OBB), "
+                f"L3D={length_3d:.1f}mm, W3D={width_3d:.1f}mm (3D OBB ref)")
 
     return {
         'cluster_id': cluster_id,
         'class': defect_class,
-        'width_mm': width_3d,
-        'length_mm': length_3d,
-        'area_mm2': area_mm2,
-        'method': 'obb',
-        'n_points': len(cluster_points)
+        'area_mm2': area_mm2,           # Primary metric (2D + scale)
+        'length_mm': length_mm,         # 2D OBB major axis
+        'width_mm': width_mm,           # 2D OBB minor axis
+        'length_3d_mm': length_3d,      # 3D OBB reference
+        'width_3d_mm': width_3d,        # 3D OBB reference
+        'method': 'area_2d_scaled',
+        'n_points': len(cluster_points),
+        'image_id': image_id,
+        'mask_id': mask_id
     }
 
 

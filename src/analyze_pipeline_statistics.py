@@ -101,6 +101,47 @@ def analyze_yolo_masks(masks_dir: Path) -> Dict:
     return stats
 
 
+def analyze_mask_usage(points_json: Path, yolo_stats: Dict) -> Dict:
+    """
+    Analyze which YOLO masks were actually used vs discarded.
+
+    Returns:
+        Statistics about mask usage (used, unused, redundancy)
+    """
+    logger.info("Analyzing mask usage...")
+
+    with open(points_json) as f:
+        data = json.load(f)
+
+    points = data['points']
+
+    # Track all (image_id, mask_id) pairs used by accepted points
+    used_masks = set()
+    for point in points:
+        sources = point.get('source_masks', [])
+        for source in sources:
+            image_id = source['image_id']
+            mask_id = source['mask_id']
+            used_masks.add((image_id, mask_id))
+
+    n_used_masks = len(used_masks)
+    total_yolo_masks = yolo_stats['total_masks']
+    n_unused_masks = total_yolo_masks - n_used_masks
+
+    usage_stats = {
+        'total_yolo_masks': total_yolo_masks,
+        'used_masks': n_used_masks,
+        'unused_masks': n_unused_masks,
+        'usage_rate': n_used_masks / total_yolo_masks if total_yolo_masks > 0 else 0,
+        'false_positive_rate': n_unused_masks / total_yolo_masks if total_yolo_masks > 0 else 0
+    }
+
+    logger.info(f"  Used masks: {n_used_masks}/{total_yolo_masks} ({usage_stats['usage_rate']*100:.1f}%)")
+    logger.info(f"  Unused masks (false positives): {n_unused_masks} ({usage_stats['false_positive_rate']*100:.1f}%)")
+
+    return usage_stats
+
+
 def analyze_crack_points(points_json: Path) -> Dict:
     """
     Analyze 3D defect points after 2-stage voting.
@@ -239,7 +280,7 @@ def analyze_clusters(clusters_json: Path, points_json: Path) -> Dict:
     return stats
 
 
-def compute_pipeline_summary(yolo_stats: Dict, points_stats: Dict, cluster_stats: Dict) -> Dict:
+def compute_pipeline_summary(yolo_stats: Dict, points_stats: Dict, cluster_stats: Dict, mask_usage: Dict) -> Dict:
     """
     Compute overall pipeline statistics and reduction ratios.
     """
@@ -250,15 +291,15 @@ def compute_pipeline_summary(yolo_stats: Dict, points_stats: Dict, cluster_stats
     n_points = points_stats['n_points']
     n_clusters = cluster_stats['n_clusters']
 
+    # Mask usage
+    n_used_masks = mask_usage['used_masks']
+    n_unused_masks = mask_usage['unused_masks']
+
     total_source_masks = points_stats['total_source_masks']
 
     # Redundancy elimination
     redundancy_eliminated = total_source_masks - n_points
     redundancy_ratio = total_source_masks / n_points if n_points > 0 else 0
-
-    # False positive estimation (masks not contributing to any point)
-    # This is approximate: masks that never passed voting
-    false_positives_estimated = n_masks - total_source_masks
 
     # Overall reduction
     overall_reduction = n_masks / n_clusters if n_clusters > 0 else 0
@@ -270,20 +311,23 @@ def compute_pipeline_summary(yolo_stats: Dict, points_stats: Dict, cluster_stats
     summary = {
         'pipeline_flow': {
             'yolo_masks': n_masks,
+            'used_masks': n_used_masks,
+            'unused_masks': n_unused_masks,
             'voting_points': n_points,
             'final_clusters': n_clusters
         },
-        'redundancy_elimination': {
-            'source_masks_used': total_source_masks,
-            'points_created': n_points,
-            'eliminated': redundancy_eliminated,
-            'avg_redundancy': redundancy_ratio
+        'mask_usage': {
+            'total_masks': n_masks,
+            'used_masks': n_used_masks,
+            'unused_masks': n_unused_masks,
+            'usage_rate': mask_usage['usage_rate'],
+            'false_positive_rate': mask_usage['false_positive_rate']
         },
-        'false_positive_removal': {
-            'original_masks': n_masks,
-            'masks_used': total_source_masks,
-            'estimated_false_positives': false_positives_estimated,
-            'removal_rate': false_positives_estimated / n_masks if n_masks > 0 else 0
+        'redundancy_elimination': {
+            'total_observations': total_source_masks,
+            'unique_points': n_points,
+            'redundant_observations': redundancy_eliminated,
+            'avg_redundancy': redundancy_ratio
         },
         'point_consolidation': {
             'accepted_points': n_points,
